@@ -14905,6 +14905,7 @@ function renderMcPop(){
       _mcPop.locLabel=cur;
       _mcPop.locLat=geo?geo.lat:null;
       _mcPop.locLon=geo?geo.lon:null;
+      _mcPop.locCity=(geo&&geo.city)||undefined;  // resolved city for the City field (undefined = not yet known)
       _mcPop.locResults=null;        // null = show saved; array = search results
       _mcPop.locSearching=false;
     }
@@ -15325,6 +15326,7 @@ function bindMcPop(pop,it){
     const arr=(src==='result')?_mcPop.locResults:shell.data.savedLocations;
     const r=arr&&arr[i];if(!r)return;
     _mcPop.locLabel=r.label;_mcPop.locLat=r.lat!=null?r.lat:null;_mcPop.locLon=r.lon!=null?r.lon:null;
+    _mcPop.locCity=(r.city!=null?r.city:undefined);  // search result carries a resolved city; saved may too
     renderMcPop();           // re-render shows the pin + current label
   });
   const locSave=pop.querySelector('[data-loc-save]');
@@ -15352,9 +15354,9 @@ function bindMcPop(pop,it){
         .setView([_mcPop.locLat,_mcPop.locLon],12);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
       const marker=L.marker([_mcPop.locLat,_mcPop.locLon],{draggable:true}).addTo(map);
-      marker.on('dragend',()=>{const p=marker.getLatLng();_mcPop.locLat=p.lat;_mcPop.locLon=p.lng;});
+      marker.on('dragend',()=>{const p=marker.getLatLng();_mcPop.locLat=p.lat;_mcPop.locLon=p.lng;_mcPop.locCity=undefined;});
       // clicking the map moves the pin
-      map.on('click',e=>{_mcPop.locLat=e.latlng.lat;_mcPop.locLon=e.latlng.lng;marker.setLatLng(e.latlng);});
+      map.on('click',e=>{_mcPop.locLat=e.latlng.lat;_mcPop.locLon=e.latlng.lng;_mcPop.locCity=undefined;marker.setLatLng(e.latlng);});
       setTimeout(()=>map.invalidateSize(),60); // fix tile layout after popover sizing
     }catch(e){/* leaflet/network unavailable — map just stays hidden */}
   }
@@ -15370,12 +15372,35 @@ function bindMcPop(pop,it){
     const label=(_mcPop.locLabel||'').trim();
     const _lf=(_mcPop.ctx&&_mcPop.ctx.fieldId)||'location';
     const _lg=(_mcPop.ctx&&_mcPop.ctx.geoId)||'locationGeo';
+    const lat=_mcPop.locLat, lon=_mcPop.locLon;
+    const hasCoords=lat!=null&&lon!=null;
+    // A trip stop carries a "City" field used to group the itinerary. Choosing a
+    // place on the map should set it automatically (the heuristic address-parse is
+    // only a fallback). Only for the stop's own `location` — transport endpoints
+    // derive their city from the flight route instead.
+    const isTripStop=_lf==='location'&&!!(o.fields&&o.fields.trip_category)&&o.fields.trip_category!=='Transport';
+    const knownCity=(typeof _mcPop.locCity==='string')?_mcPop.locCity.trim():'';
     shell.data.mutate(()=>{
       o.fields[_lf]=label;
-      o.fields[_lg]=(_mcPop.locLat!=null&&_mcPop.locLon!=null)?{label,lat:_mcPop.locLat,lon:_mcPop.locLon}:null;
+      o.fields[_lg]=hasCoords?{label,lat,lon,city:(knownCity||undefined)}:null;
+      if(isTripStop&&knownCity)setCustomFieldValue(itemId,'trip_city',knownCity);
       o.updatedAt=Date.now();
     },{entity:'item',render:false});
-    if(label)rememberLocation({label,lat:_mcPop.locLat,lon:_mcPop.locLon}); // add to saved/recents
+    if(label)rememberLocation({label,lat,lon,city:(knownCity||undefined)}); // add to saved/recents
+    // Hand-moved pin (or typed place) with no resolved city yet → look it up in the
+    // background and fill the City field once it lands, without blocking the save.
+    if(isTripStop&&!knownCity&&hasCoords){
+      reverseGeocodeCity(lat,lon).then(city=>{
+        city=(city||'').trim();if(!city)return;
+        const o2=getItem(itemId);if(!o2)return;
+        shell.data.mutate(()=>{
+          if(o2.fields&&o2.fields[_lg])o2.fields[_lg].city=city;
+          setCustomFieldValue(itemId,'trip_city',city);
+        },{entity:'item',render:false});
+        try{shell.ui.refreshCanvas();}catch(_){swallow(_)}
+        try{if(typeof refreshCardModal==='function'&&window._cardModalItemId)refreshCardModal();}catch(_){swallow(_)}
+      });
+    }
     reRender('Location updated');closeMcPop();
   }
   // labels list — on search, re-render ONLY the list so the <input> survives and
@@ -15752,20 +15777,38 @@ window._tzChipSync=_tzChipSync;
 try{_tzChipSync();}catch(_){swallow(_)}
 
 // ── GEOCODING (OpenStreetMap Nominatim — free, no API key) ──
-// Returns a promise of [{label,lat,lon}]. Fails gracefully (empty array) when
+// Returns a promise of [{label,lat,lon,city}]. Fails gracefully (empty array) when
 // the network/CSP blocks the request (e.g. inside a sandboxed preview).
+// Pick the most "city-like" name out of a Nominatim structured address. Falls
+// through progressively coarser admin levels so somewhere always wins when the
+// place sits outside a named city (a town, a village, a county…).
+function _cityFromAddress(a){
+  if(!a)return '';
+  return a.city||a.town||a.village||a.municipality||a.city_district||a.suburb||a.county||a.state||'';
+}
 function geocodeSearch(query){
   const q=(query||'').trim();
   if(q.length<3)return Promise.resolve([]);
-  const url='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q='+encodeURIComponent(q);
+  const url='https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&q='+encodeURIComponent(q);
   return fetch(url,{headers:{'Accept':'application/json'}})
     .then(r=>r.ok?r.json():[])
     .then(rows=>(rows||[]).map(r=>({
       label:r.display_name,
       lat:parseFloat(r.lat),
-      lon:parseFloat(r.lon)
+      lon:parseFloat(r.lon),
+      city:_cityFromAddress(r.address)   // resolved city, for auto-filling the City field
     })))
     .catch(()=>[]);   // offline / blocked → no results, UI shows manual entry
+}
+// Resolve just the city for a dropped/dragged pin (no search result to read from).
+// Promise<string> ('' when offline/blocked or nothing found).
+function reverseGeocodeCity(lat,lon){
+  if(lat==null||lon==null)return Promise.resolve('');
+  const url='https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&lat='+lat+'&lon='+lon;
+  return fetch(url,{headers:{'Accept':'application/json'}})
+    .then(r=>r.ok?r.json():null)
+    .then(j=>j?_cityFromAddress(j.address):'')
+    .catch(()=>'');
 }
 
 // helpers: combine a date with an existing ts's time (or a default HH:MM)
