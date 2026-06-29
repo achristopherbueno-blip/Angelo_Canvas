@@ -1558,6 +1558,8 @@ body.mctl-grabbing #mctl-grab-hint{display:block;}
 .mc-dp-chip:hover{border-color:var(--border3);}
 .mc-dp-chip.on{border:1.5px solid var(--accent2);background:var(--accent-bg);color:var(--accent2);font-weight:600;}
 .mc-dp-dash{color:var(--text3);flex-shrink:0;}
+.mc-dp-durrow{margin-top:-2px;}
+.mc-dp-dur{font-size:11.5px;font-weight:600;color:var(--text2);letter-spacing:0.01em;}
 .mc-dp-time{flex:1;min-width:0;height:32px;padding:0 8px;border:0.5px solid var(--border2);border-radius:var(--sl-border-radius-large);font-size:12px;font-family:inherit;color:var(--text);background:var(--surface);}
 .mc-dp-zone{flex:1;min-width:0;height:32px;font-size:12px;} /* + .field .field--select */
 .mc-dp-tzsplit .mc-dp-timecol{flex:1;min-width:0;}
@@ -9935,17 +9937,22 @@ function _mcFmtTs(ts){
     d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
 }
 // "May 12 - May 29, 9:40 AM" style range. Falls back to a single date.
-function _mcFmtDateRange(start,end){
+// Optional tzStart/tzEnd render each end in its own zone (a flight's arrival shows
+// in the destination zone); omit them to keep the original device-local behaviour.
+function _mcFmtDateRange(start,end,tzStart,tzEnd){
   const opt={month:'short',day:'numeric'};
+  const dOpt=z=>z?Object.assign({timeZone:z},opt):opt;
+  const tOpt=z=>z?{timeZone:z,hour:'numeric',minute:'2-digit'}:{hour:'numeric',minute:'2-digit'};
   if(start!=null&&end!=null){
     const ds=new Date(start),de=new Date(end);
-    const endTime=de.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
-    return ds.toLocaleDateString('en-US',opt)+' - '+de.toLocaleDateString('en-US',opt)+', '+endTime;
+    const endTime=de.toLocaleTimeString('en-US',tOpt(tzEnd||tzStart));
+    return ds.toLocaleDateString('en-US',dOpt(tzStart))+' - '+de.toLocaleDateString('en-US',dOpt(tzEnd||tzStart))+', '+endTime;
   }
   const one=start!=null?start:end;
   if(one==null)return '';
+  const z=(start!=null)?tzStart:(tzEnd||tzStart);
   const d=new Date(one);
-  return d.toLocaleDateString('en-US',opt)+', '+d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+  return d.toLocaleDateString('en-US',dOpt(z))+', '+d.toLocaleTimeString('en-US',tOpt(z));
 }
 // human duration: "2w 3d 1h 40m" — compact, drops zero units, max 4 parts
 function _mcFmtDuration(ms){
@@ -13516,7 +13523,11 @@ function openWnAddPopover(node,btnEl,type,extraFields){
   // store handler ref so we can remove on close
   pop._keyhandler=null;// keydown is handled above inline; outside click below
   const outside=e=>{
-    if(!pop.contains(e.target)&&e.target!==btnEl){finish(false);}
+    if(pop.contains(e.target)||e.target===btnEl)return;
+    // chip pickers (status / priority / type / dates) render into the body-level
+    // #mc-pop-layer so they can overflow the popover — clicking them must NOT close it.
+    if(e.target.closest&&e.target.closest('#mc-pop-layer'))return;
+    finish(false);
   };
   setTimeout(()=>document.addEventListener('mousedown',outside,true),0);
   pop._outside=outside;
@@ -14974,8 +14985,13 @@ function renderDatePicker(it){
   const daysInMonth=new Date(m.getFullYear(),m.getMonth()+1,0).getDate();
   const todayKey=new Date().toDateString();
   const selStart=_mcPop.dpStart, selEnd=_mcPop.dpEnd;
-  const selStartKey=selStart!=null?new Date(selStart).toDateString():null;
-  const selEndKey=selEnd!=null?new Date(selEnd).toDateString():null;
+  // Each end's calendar day is the day IN ITS OWN ZONE (a flight's arrival can fall
+  // on a different calendar day in the destination zone than it would here).
+  const _zStart=_mcPop.dpTz||userTimeZone();
+  const _zEnd=_mcPop.dpTzEnd||_zStart;
+  const _dayOrd=(ts,zone)=>{if(ts==null)return null;const p=tsToZonedParts(zone,ts);return Date.UTC(p.y,p.mo,p.d);};
+  const selStartOrd=_dayOrd(selStart,_zStart);
+  const selEndOrd=_dayOrd(selEnd,_zEnd);
   const target=_mcPop.dpTarget||'start';
   let cells='';
   const dows=['Mo','Tu','We','Th','Fr','Sa','Su'];
@@ -14984,35 +15000,38 @@ function renderDatePicker(it){
     const dnum=new Date(m.getFullYear(),m.getMonth(),0-(startDow-1-i)).getDate();
     cells+=`<div class="mc-dp-cell mc-dp-out">${dnum}</div>`;
   }
-  // highlight selected start/end and the in-between range
-  const dayStart=selStart!=null?new Date(new Date(selStart).setHours(0,0,0,0)).getTime():null;
-  const dayEnd=selEnd!=null?new Date(new Date(selEnd).setHours(0,0,0,0)).getTime():null;
+  // highlight selected start/end and the in-between range (day ordinals, zone-aware)
   for(let d=1;d<=daysInMonth;d++){
     const dt=new Date(m.getFullYear(),m.getMonth(),d);
     const key=dt.toDateString();
-    const dayTs=new Date(dt).setHours(0,0,0,0);
+    const cellOrd=Date.UTC(m.getFullYear(),m.getMonth(),d);
     let cls='mc-dp-cell';
     if(key===todayKey)cls+=' mc-dp-today';
-    if(dayStart!=null&&dayEnd!=null&&dayTs>dayStart&&dayTs<dayEnd)cls+=' mc-dp-range';
-    if(key===selStartKey)cls+=' mc-dp-sel mc-dp-sel-start';
-    if(key===selEndKey)cls+=' mc-dp-sel mc-dp-sel-end';
+    if(selStartOrd!=null&&selEndOrd!=null&&cellOrd>selStartOrd&&cellOrd<selEndOrd)cls+=' mc-dp-range';
+    if(cellOrd===selStartOrd)cls+=' mc-dp-sel mc-dp-sel-start';
+    if(cellOrd===selEndOrd)cls+=' mc-dp-sel mc-dp-sel-end';
     cells+=`<div class="${cls}" data-dp-day="${d}">${d}</div>`;
   }
-  const tval=(ts)=>ts!=null?new Date(ts).toTimeString().slice(0,5):'';
-  const dchip=(ts)=>ts!=null?new Date(ts).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}):'Set date';
+  const tval=(ts,zone)=>{if(ts==null)return '';const p=tsToZonedParts(zone,ts);return String(p.hh).padStart(2,'0')+':'+String(p.mm).padStart(2,'0');};
+  const dchip=(ts,zone)=>ts!=null?new Intl.DateTimeFormat('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:zone||undefined}).format(new Date(ts)):'Set date';
   const allDay=!!_mcPop.dpAllDay;
   const tzStart=_mcPop.dpTz||userTimeZone();
   const tzEndZone=_mcPop.dpTzEnd||tzStart;
   const tzOptsFor=(sel)=>tzOptions().map(z=>`<option value="${z}"${z===sel?' selected':''}>${escHtml(tzLabel(z,Date.now()))}</option>`).join('');
   // ── attribute rows: one leading icon, start – end ──
   const datesRow=`<div class="mc-dp-frow"><i class="ph ph-calendar-blank mc-dp-fic"></i>`+
-    `<button class="mc-dp-chip${target==='start'?' on':''}" data-dp-target="start">${dchip(selStart)}</button>`+
+    `<button class="mc-dp-chip${target==='start'?' on':''}" data-dp-target="start">${dchip(selStart,tzStart)}</button>`+
     `<span class="mc-dp-dash">–</span>`+
-    `<button class="mc-dp-chip${target==='end'?' on':''}" data-dp-target="end">${dchip(selEnd)}</button></div>`;
+    `<button class="mc-dp-chip${target==='end'?' on':''}" data-dp-target="end">${dchip(selEnd,tzEndZone)}</button></div>`;
   const timesRow=allDay?'':`<div class="mc-dp-frow"><i class="ph ph-clock mc-dp-fic"></i>`+
-    `<input type="time" class="mc-dp-time" data-dp-starttime value="${tval(selStart)}" aria-label="Start time">`+
+    `<input type="time" class="mc-dp-time" data-dp-starttime value="${tval(selStart,tzStart)}" aria-label="Start time">`+
     `<span class="mc-dp-dash">–</span>`+
-    `<input type="time" class="mc-dp-time" data-dp-endtime value="${tval(selEnd)}" aria-label="End time"></div>`;
+    `<input type="time" class="mc-dp-time" data-dp-endtime value="${tval(selEnd,tzEndZone)}" aria-label="End time"></div>`;
+  // live elapsed time between the two instants — correct even when the ends sit in
+  // different zones, since both are absolute (e.g. SYD 10:00 → LAX 06:00 ≈ 13h 30m).
+  const durRow=(!allDay&&selStart!=null&&selEnd!=null&&selEnd>selStart)
+    ? `<div class="mc-dp-frow mc-dp-durrow"><i class="ph ph-hourglass-medium mc-dp-fic"></i><span class="mc-dp-dur">${_mcFmtDuration(selEnd-selStart)}</span></div>`
+    : '';
   const zonesRow=allDay?'':(
     _mcPop.dpTzSplit
       ? `<div class="mc-dp-frow"><i class="ph ph-globe-hemisphere-west mc-dp-fic"></i>`+
@@ -15031,7 +15050,7 @@ function renderDatePicker(it){
       `<span class="mc-dp-arrow" data-dp-next><i class="ph ph-caret-right"></i></span></div>`+
     `<div class="mc-dp-grid">${cells}</div>`+
     `<div class="mc-dp-divider"></div>`+
-    datesRow+timesRow+zonesRow+alldayRow+
+    datesRow+timesRow+zonesRow+durRow+alldayRow+
     `<div class="mc-pop-btn-row"><button class="mc-pop-btn" data-dp-save>Save</button>`+
     `<button class="mc-pop-btn mc-pop-btn-ghost" data-dp-clear>Clear</button></div>`;
 }
@@ -15418,31 +15437,60 @@ function bindMcPop(pop,it){
   pop.querySelectorAll('[data-dp-target]').forEach(b=>b.onclick=()=>{_mcPop.dpTarget=b.dataset.dpTarget;renderMcPop();});
   pop.querySelectorAll('[data-dp-day]').forEach(c=>c.onclick=()=>{
     const d=+c.dataset.dpDay;
-    const picked=new Date(_mcPop.dpMonth.getFullYear(),_mcPop.dpMonth.getMonth(),d);
+    const py=_mcPop.dpMonth.getFullYear(), pmo=_mcPop.dpMonth.getMonth();
+    // keep the field's existing wall-clock time (read in its own zone), just move the day
+    const _mergeDay=(ts,defHHMM,zone)=>{
+      let hh,mm;
+      if(ts!=null){const p=tsToZonedParts(zone,ts);hh=p.hh;mm=p.mm;}
+      else{const dp=(defHHMM||'09:00').split(':');hh=+dp[0];mm=+dp[1];}
+      return zonedWallToTs(zone,py,pmo,d,hh,mm);
+    };
     if((_mcPop.dpTarget||'start')==='start'){
-      _mcPop.dpStart=mergeDateTime(picked,_mcPop.dpStart,'09:00');
+      _mcPop.dpStart=_mergeDay(_mcPop.dpStart,'09:00',_mcPop.dpTz||userTimeZone());
       // keep end ≥ start
       if(_mcPop.dpEnd!=null&&_mcPop.dpEnd<_mcPop.dpStart)_mcPop.dpEnd=_mcPop.dpStart;
       _mcPop.dpTarget='end'; // advance to end for a natural two-tap flow
     }else{
-      let endTs=mergeDateTime(picked,_mcPop.dpEnd,'17:00');
+      let endTs=_mergeDay(_mcPop.dpEnd,'17:00',_mcPop.dpTzEnd||_mcPop.dpTz||userTimeZone());
       if(_mcPop.dpStart!=null&&endTs<_mcPop.dpStart)endTs=_mcPop.dpStart;
       _mcPop.dpEnd=endTs;
     }
     renderMcPop();
   });
+  // re-time an instant to a new HH:MM within its own zone, preserving its day-in-zone
+  const _applyTimeZ=(ts,hhmm,zone)=>{
+    if(!hhmm)return ts;
+    const p=tsToZonedParts(zone,ts);const sp=hhmm.split(':');
+    return zonedWallToTs(zone,p.y,p.mo,p.d,+sp[0],+sp[1]);
+  };
   const st=pop.querySelector('[data-dp-starttime]');
-  if(st)st.onchange=()=>{if(_mcPop.dpStart==null)_mcPop.dpStart=Date.now();_mcPop.dpStart=applyTime(_mcPop.dpStart,st.value);renderMcPop();};
+  if(st)st.onchange=()=>{const z=_mcPop.dpTz||userTimeZone();if(_mcPop.dpStart==null)_mcPop.dpStart=Date.now();_mcPop.dpStart=_applyTimeZ(_mcPop.dpStart,st.value,z);renderMcPop();};
   const et=pop.querySelector('[data-dp-endtime]');
-  if(et)et.onchange=()=>{if(_mcPop.dpEnd==null)_mcPop.dpEnd=(_mcPop.dpStart!=null?_mcPop.dpStart:Date.now());_mcPop.dpEnd=applyTime(_mcPop.dpEnd,et.value);renderMcPop();};
+  if(et)et.onchange=()=>{const z=_mcPop.dpTzEnd||_mcPop.dpTz||userTimeZone();if(_mcPop.dpEnd==null)_mcPop.dpEnd=(_mcPop.dpStart!=null?_mcPop.dpStart:Date.now());_mcPop.dpEnd=_applyTimeZ(_mcPop.dpEnd,et.value,z);renderMcPop();};
+  // Zone changes keep the wall clock you typed and shift the underlying instant —
+  // so picking the arrival city leaves "06:00" reading 06:00, and the duration
+  // recomputes against the true offset gap.
   const tzSel=pop.querySelector('[data-dp-tz]');
-  if(tzSel)tzSel.onchange=()=>{_mcPop.dpTz=tzSel.value;renderMcPop();};
+  if(tzSel)tzSel.onchange=()=>{
+    const oldZone=_mcPop.dpTz||userTimeZone(), newZone=tzSel.value;
+    _mcPop.dpStart=_rezoneTs(_mcPop.dpStart,oldZone,newZone);
+    if(!_mcPop.dpTzSplit)_mcPop.dpEnd=_rezoneTs(_mcPop.dpEnd,oldZone,newZone); // single zone governs both ends
+    _mcPop.dpTz=newZone;renderMcPop();
+  };
   const tzEndSel=pop.querySelector('[data-dp-tzend]');
-  if(tzEndSel)tzEndSel.onchange=()=>{_mcPop.dpTzEnd=tzEndSel.value;renderMcPop();};
+  if(tzEndSel)tzEndSel.onchange=()=>{
+    const oldZone=_mcPop.dpTzEnd||_mcPop.dpTz||userTimeZone(), newZone=tzEndSel.value;
+    _mcPop.dpEnd=_rezoneTs(_mcPop.dpEnd,oldZone,newZone);
+    _mcPop.dpTzEnd=newZone;renderMcPop();
+  };
   const tzSplit=pop.querySelector('[data-dp-tzsplit]');
   if(tzSplit)tzSplit.onclick=()=>{_mcPop.dpTzSplit=true;if(!_mcPop.dpTzEnd)_mcPop.dpTzEnd=_mcPop.dpTz||userTimeZone();renderMcPop();};
   const tzSame=pop.querySelector('[data-dp-tzsame]');
-  if(tzSame)tzSame.onclick=()=>{_mcPop.dpTzSplit=false;_mcPop.dpTzEnd=null;renderMcPop();};
+  if(tzSame)tzSame.onclick=()=>{
+    const oldZone=_mcPop.dpTzEnd||_mcPop.dpTz||userTimeZone(), newZone=_mcPop.dpTz||userTimeZone();
+    _mcPop.dpEnd=_rezoneTs(_mcPop.dpEnd,oldZone,newZone);   // collapse to start zone, keeping the shown time
+    _mcPop.dpTzSplit=false;_mcPop.dpTzEnd=null;renderMcPop();
+  };
   const adTog=pop.querySelector('[data-dp-allday]');
   if(adTog)adTog.onclick=e=>{e.preventDefault();_mcPop.dpAllDay=!_mcPop.dpAllDay;renderMcPop();};
   const dpSave=pop.querySelector('[data-dp-save]');
@@ -15535,6 +15583,35 @@ function _tzOffsetMs(tz,ts){
     const p={};dtf.formatToParts(new Date(ts)).forEach(x=>{if(x.type!=='literal')p[x.type]=x.value;});
     return Date.UTC(+p.year,+p.month-1,+p.day,(+p.hour)%24,+p.minute,+p.second)-(Math.floor(ts/1000)*1000);
   }catch(_){return -new Date(ts).getTimezoneOffset()*60000;}
+}
+// ── ZONE-AWARE WALL-CLOCK ⇄ INSTANT ──────────────────────────────────────────
+// The wall clock a user types ("depart 10:00", "arrive 06:00") is only meaningful
+// paired with a zone. These two convert between an absolute instant (ms epoch) and
+// the wall-clock fields as seen in a given IANA zone, so a flight's start can be
+// read/written in the origin zone and its end in the destination zone. With both
+// ends anchored to their true zones, end−start is the real elapsed time — the
+// duration is correct across zones with no special-casing downstream.
+// tz null/'' → device-local (identity with the old behaviour).
+function tsToZonedParts(tz,ts){
+  if(ts==null)return null;
+  if(!tz){const d=new Date(ts);return {y:d.getFullYear(),mo:d.getMonth(),d:d.getDate(),hh:d.getHours(),mm:d.getMinutes()};}
+  const w=new Date(ts+_tzOffsetMs(tz,ts));   // a Date whose UTC getters read the zone's wall clock
+  return {y:w.getUTCFullYear(),mo:w.getUTCMonth(),d:w.getUTCDate(),hh:w.getUTCHours(),mm:w.getUTCMinutes()};
+}
+function zonedWallToTs(tz,y,mo,d,hh,mm){
+  if(!tz)return new Date(y,mo,d,hh,mm,0,0).getTime();
+  const guess=Date.UTC(y,mo,d,hh,mm,0,0);    // wall clock read as if it were UTC
+  let off=_tzOffsetMs(tz,guess), ts=guess-off;
+  const off2=_tzOffsetMs(tz,ts);             // refine once across a DST edge
+  if(off2!==off)ts=guess-off2;
+  return ts;
+}
+// Keep an instant's wall clock but reinterpret it in a new zone (zone relabel:
+// the time you see stays, the underlying instant shifts).
+function _rezoneTs(ts,oldZone,newZone){
+  if(ts==null||!newZone||oldZone===newZone)return ts;
+  const p=tsToZonedParts(oldZone,ts);
+  return zonedWallToTs(newZone,p.y,p.mo,p.d,p.hh,p.mm);
 }
 // shift to add to an instant so a device-local Date reads the DISPLAY-zone wall clock
 function _tzShift(ts){const dz=displayTz(),dev=_tzDevice();return dz===dev?0:(_tzOffsetMs(dz,ts)-_tzOffsetMs(dev,ts));}
@@ -22660,7 +22737,8 @@ function _mcLabelsRow(it){
 }
 function _mcDatesRow(it){
   const start=it.fields.start, due=it.fields.due!=null?it.fields.due:null;
-  const rangeText=_mcFmtDateRange(start,due);
+  const _tzS=it.fields.tz||null, _tzE=it.fields.tzEnd||null;
+  const rangeText=(_tzE&&_tzE!==_tzS)?_mcFmtDateRange(start,due,_tzS||userTimeZone(),_tzE):_mcFmtDateRange(start,due);
   const status=_mcDueStatus(it);
   let durMs=null;
   if(start!=null&&due!=null)durMs=due-start; else if(it.fields.durationMin!=null)durMs=it.fields.durationMin*60000;
