@@ -2551,6 +2551,12 @@ body.elev-deep #topleft-bar{border-color:var(--border2);}
   #card-modal{width:100%;max-width:100%;}
   #card-modal.dz-mid{--drawer-h:64vh;}
 }
+/* On-screen keyboard up: push the bottom drawer above the keyboard and cap it to
+   the visible band, so the focused field and the rest of the card stay visible
+   and scrollable instead of being hidden behind the keyboard. --kb / --vvh are
+   published by the visual-viewport tracker; both are 0 / full height on desktop. */
+html.kb-open #card-modal-overlay{padding-bottom:var(--kb,0px);}
+html.kb-open #card-modal{max-height:calc(var(--vvh,100dvh) - 8px);}
 
 /* ── Touch chrome: enlarge the floating bars' tap targets where the primary
    pointer is touch. min-* acts as a floor over the existing fixed heights,
@@ -7384,6 +7390,62 @@ function _safeAreaInsets(){
 }
 window.addEventListener('resize',()=>{_saiCache=null;});
 
+// ── ON-SCREEN KEYBOARD / VISUAL-VIEWPORT TRACKER ─────────────────────────────
+// The mobile keyboard shrinks the VISUAL viewport but leaves the LAYOUT viewport
+// (window.innerHeight, vh/dvh) unchanged. Without compensating, bottom-anchored
+// modals and button-anchored popovers end up behind the keyboard and their scroll
+// containers still believe they're full height. We measure the visible band and
+// the keyboard inset, publish them as CSS variables, and re-anchor any open
+// popover whenever they change. On desktop (no keyboard) the inset is 0 and every
+// value collapses to the layout viewport, so behaviour is identical to before.
+// Returns the VISIBLE viewport rectangle in layout-viewport coordinates — the same
+// coordinate space as getBoundingClientRect() and position:fixed top/left — so the
+// positioning helpers can clamp straight to it.
+function _visualViewport(){
+  const vv=window.visualViewport;
+  if(vv)return {left:vv.offsetLeft,top:vv.offsetTop,width:vv.width,height:vv.height,right:vv.offsetLeft+vv.width,bottom:vv.offsetTop+vv.height};
+  return {left:0,top:0,width:window.innerWidth,height:window.innerHeight,right:window.innerWidth,bottom:window.innerHeight};
+}
+let _kbInset=0;
+function _syncViewportVars(){
+  const vv=window.visualViewport;
+  let kb=0, vvh=window.innerHeight, vvtop=0;
+  if(vv){
+    vvh=vv.height; vvtop=vv.offsetTop;
+    kb=Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    if(kb<60)kb=0;   // tiny deltas are browser-UI rounding, not a keyboard
+  }
+  _kbInset=kb;
+  const root=document.documentElement;
+  root.style.setProperty('--kb', kb+'px');
+  root.style.setProperty('--vvh', vvh+'px');
+  root.style.setProperty('--vvtop', vvtop+'px');
+  root.classList.toggle('kb-open', kb>0);
+  // keep whatever's open anchored inside the now-smaller visible band
+  try{ if(_mcPop){ const p=document.querySelector('#mc-pop-layer .mc-pop'); if(p&&typeof positionMcPop==='function')positionMcPop(p); } }catch(_){swallow(_)}
+  try{ const ap=document.getElementById('wn-add-pop'); if(ap&&ap.classList.contains('open')&&typeof _clampToViewport==='function')_clampToViewport(ap); }catch(_){swallow(_)}
+}
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',_syncViewportVars);
+  window.visualViewport.addEventListener('scroll',_syncViewportVars);
+}
+window.addEventListener('resize',_syncViewportVars);
+window.addEventListener('orientationchange',()=>setTimeout(_syncViewportVars,200));
+_syncViewportVars();
+// When a field inside a modal/popover is focused, bring it into the visible band.
+// Fixed-layer pickers can't be scrolled to, so we re-anchor those instead. The
+// delay lets the keyboard finish animating in before we measure.
+document.addEventListener('focusin',e=>{
+  const t=e.target;
+  if(!t||!t.matches||!t.matches('input,textarea,select,[contenteditable],[contenteditable="true"]'))return;
+  if(!t.closest('#card-modal,#wn-add-pop,.mc-pop,#cell-add-pop,#kc-ctx-pop,.dp-floatpanel,#data-panel,#canvas-menu'))return;
+  setTimeout(()=>{
+    try{ if(t.isConnected && t.closest('#card-modal'))t.scrollIntoView({block:'center',behavior:'smooth'}); }catch(_){swallow(_)}
+    try{ if(_mcPop){ const p=document.querySelector('#mc-pop-layer .mc-pop'); if(p&&typeof positionMcPop==='function')positionMcPop(p); } }catch(_){swallow(_)}
+    try{ const ap=document.getElementById('wn-add-pop'); if(ap&&ap.classList.contains('open')&&typeof _clampToViewport==='function')_clampToViewport(ap); }catch(_){swallow(_)}
+  },260);
+});
+
 function stackCtxMenu(cx,cy){
   buildCtxMenu([
     {icon:'<i class="ph ph-caret-left"></i>',label:'Previous card',action:()=>stackStep(-1)},
@@ -9596,7 +9658,11 @@ function showReorderLine(widgetNode,info){
     // empty column/cell — span the container
     const host=info.column||info.dateCell||widgetNode;
     const r=host.getBoundingClientRect();
-    x=r.left+6;y=r.top+r.height/2;w=Math.max(40,r.width-12);
+    // An empty kanban column drops the card at the TOP of its scroll (above the
+    // "+ Add task" trigger), so anchor the line there rather than the column middle.
+    const sc=info.column?info.column.querySelector('.kanban-col-scroll'):null;
+    if(sc){const sr=sc.getBoundingClientRect();x=sr.left+6;y=sr.top+2;w=Math.max(40,sr.width-12);}
+    else{x=r.left+6;y=r.top+r.height/2;w=Math.max(40,r.width-12);}
   }
   _reorderLine.style.left=x+'px';
   _reorderLine.style.top=y+'px';
@@ -15063,14 +15129,14 @@ function renderDatePicker(it){
 function _clampToViewport(el,pad){
   if(!el)return;
   pad=(pad==null)?8:pad;
-  const vw=window.innerWidth, vh=window.innerHeight;
+  const vp=_visualViewport();   // visible band, excludes the keyboard
   // cap size first so the position clamp measures the final box
   let r=el.getBoundingClientRect();
-  if(r.width>vw-2*pad)el.style.maxWidth=(vw-2*pad)+'px';
-  if(r.height>vh-2*pad){el.style.maxHeight=(vh-2*pad)+'px';el.style.overflowY='auto';}
+  if(r.width>vp.width-2*pad)el.style.maxWidth=(vp.width-2*pad)+'px';
+  if(r.height>vp.height-2*pad){el.style.maxHeight=(vp.height-2*pad)+'px';el.style.overflowY='auto';}
   r=el.getBoundingClientRect();
-  let left=Math.max(pad,Math.min(r.left, vw-pad-r.width));
-  let top =Math.max(pad,Math.min(r.top , vh-pad-r.height));
+  let left=Math.max(vp.left+pad,Math.min(r.left, vp.right-pad-r.width));
+  let top =Math.max(vp.top+pad ,Math.min(r.top , vp.bottom-pad-r.height));
   el.style.left=Math.round(left)+'px';
   el.style.top =Math.round(top)+'px';
 }
@@ -15080,8 +15146,9 @@ function _clampToViewport(el,pad){
 function _centerPopover(el){
   if(!el)return;
   const pw=el.offsetWidth||280, ph=el.offsetHeight||200;
-  el.style.left=Math.round(Math.max(8,(window.innerWidth-pw)/2))+'px';
-  el.style.top =Math.round(Math.max(8,(window.innerHeight-ph)/2))+'px';
+  const vp=_visualViewport();
+  el.style.left=Math.round(Math.max(vp.left+8,vp.left+(vp.width-pw)/2))+'px';
+  el.style.top =Math.round(Math.max(vp.top+8 ,vp.top +(vp.height-ph)/2))+'px';
 }
 
 /* positionPopover(el, anchor, {side, align, gap, pad}) — the one place anchor
@@ -15108,7 +15175,7 @@ function positionPopover(el, anchor, opts){
   if(!r || (r.width===0&&r.height===0&&r.top===0&&r.left===0)){ _centerPopover(el); return el; }
   const pr=el.getBoundingClientRect();
   const w=pr.width||el.offsetWidth, h=pr.height||el.offsetHeight;
-  const vw=window.innerWidth, vh=window.innerHeight;
+  const _vp=_visualViewport(); const vw=_vp.width, vh=_vp.height;   // visible band, excludes keyboard
   let left, top;
   if(side==='top'||side==='bottom'){
     top=(side==='bottom')?r.bottom+gap:r.top-gap-h;
@@ -15139,14 +15206,15 @@ function positionMcPop(pop){
   // lives in the body-level fixed layer it is never cropped or pushes content.
   // Fall back to the viewport if no host can be resolved.
   let host=t.closest('#card-modal')||t.closest('.widget-node');
-  let bL=pad, bT=pad, bR=window.innerWidth-pad, bB=window.innerHeight-pad;
+  const vp=_visualViewport();   // visible band, excludes the keyboard
+  let bL=vp.left+pad, bT=vp.top+pad, bR=vp.right-pad, bB=vp.bottom-pad;
   if(host){
     const hr=host.getBoundingClientRect();
-    // intersect host rect with the viewport so we never aim off-screen
-    bL=Math.max(pad,hr.left+4);
-    bT=Math.max(pad,hr.top+4);
-    bR=Math.min(window.innerWidth-pad,hr.right-4);
-    bB=Math.min(window.innerHeight-pad,hr.bottom-4);
+    // intersect host rect with the VISIBLE viewport so we never aim off-screen or behind the keyboard
+    bL=Math.max(vp.left+pad,hr.left+4);
+    bT=Math.max(vp.top+pad,hr.top+4);
+    bR=Math.min(vp.right-pad,hr.right-4);
+    bB=Math.min(vp.bottom-pad,hr.bottom-4);
   }
   // preferred: just below the trigger, left-aligned to it
   let left=tr.left;
@@ -16148,8 +16216,17 @@ function bindRowDrag(row,node){
               beforeEl.parentNode.insertBefore(row,beforeEl);
             }else if(ri.lastRow&&ri.lastRow.parentNode){
               ri.lastRow.parentNode.insertBefore(row,ri.lastRow.nextSibling);
-            }else if(ri.column||ri.dateCell){
-              (ri.column||ri.dateCell).appendChild(row);
+            }else if(ri.column){
+              // EMPTY kanban column: cards live INSIDE .kanban-col-scroll, above the
+              // "+ Add task" trigger — which is exactly where the card lands on
+              // release. Insert there (at the top) rather than appending to the
+              // column, which dropped the placeholder below the scroll / add button
+              // so the preview didn't match the landing slot.
+              const scroll=ri.column.querySelector('.kanban-col-scroll')||ri.column;
+              const addTrig=scroll.querySelector(':scope > .wn-add-trigger');
+              scroll.insertBefore(row,addTrig||null);
+            }else if(ri.dateCell){
+              ri.dateCell.appendChild(row);
             }
             flipPlay(sourceWidget);
           }
