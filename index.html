@@ -1729,17 +1729,11 @@ body.dark .toaster[data-rich="true"] .toast[data-type="warning"]{--t-bg:hsl(64,1
 .kanban-col{display:flex;flex-direction:column;gap:4px;flex:1 1 0;min-width:172px;min-height:0;}
 /* the card list scrolls vertically inside its column; the title stays pinned */
 .kanban-col-scroll{flex:1 1 0;min-height:0;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:4px;padding-right:2px;padding-bottom:2px;}
-/* An empty column's scroll holds only the "Add task" trigger, so in lane mode it
-   collapses to a tiny strip that's hard to drop onto. Give empty columns a real
-   drop height; populated columns keep min-height:0 for proper flex scrolling. */
+/* Empty columns keep a comfortable minimum drop height for short boards / lane
+   mode (where the scroll can't flex-fill); otherwise flex:1 1 0 stretches the
+   drop area to the FULL column height, so you can drop anywhere in the column.
+   The "+ Add task" trigger keeps its own dashed pill — no separate box outline. */
 .kanban-col-scroll:empty,.kanban-col-scroll:has(> .wn-add-trigger:only-child){min-height:140px;}
-/* a dashed "drop here" hint fills the empty drop zone so the whole area reads as
-   a target (and is comfortably large to hit while dragging) */
-.kanban-col-scroll:has(> .wn-add-trigger:only-child){position:relative;}
-.kanban-col-scroll:has(> .wn-add-trigger:only-child)::before{
-  content:"";position:absolute;left:2px;right:2px;top:2px;bottom:2px;border-radius:var(--sl-border-radius-large);
-  border:1.5px dashed var(--border2);opacity:.5;pointer-events:none;transition:opacity .12s,border-color .12s;}
-.kanban-col.col-drop-hot .kanban-col-scroll::before{opacity:0;}
 /* cards keep their natural height — the column scrolls instead of cramming the
    cards when the widget is short (fixes cropped/compressed tasks). */
 .kanban-col-scroll>*{flex-shrink:0;}
@@ -13465,7 +13459,7 @@ function openWnAddPopover(node,btnEl,type,extraFields){
   const draft=createItem(projId,'task','',seed);
   if(draft){draft._draft=true;if(ex.__assignee&&getUser(ex.__assignee))draft.assigneeIds=[ex.__assignee];}
   // render chipbar
-  const chipbarHtml=()=>`<div class="mc-chipbar">${_mcStatusChip(draft)}${_mcProjectChip(draft)}${_mcPriorityChip(draft)}${_mcTypeChip(draft)}${_capDateChipFor(draft)}<span class="mc-chipbar-sp"></span>${_mcButtonRow(draft)}</div>`;
+  const chipbarHtml=()=>`<div class="mc-chipbar">${_mcStatusChip(draft)}${_mcProjectChip(draft)}${_mcPriorityChip(draft)}${_mcTypeChip(draft)}${_mcTransitChip(draft)}${_capDateChipFor(draft)}<span class="mc-chipbar-sp"></span>${_mcButtonRow(draft)}</div>`;
   const reRender=()=>{
     const r=chiphost.querySelector('.mc-root');
     if(r){r.innerHTML=chipbarHtml()+_mcPopHost();bindMcRoot(r,reRender,node);}
@@ -13686,7 +13680,7 @@ function openKanbanCardEditor(it,x,y,node){
   // dates + Rate / Bookmark) → standardised, with Delete appended into the same
   // row beside Rate / Bookmark.
   const delChip=`<button class="kcx-delete" data-kcx-delete type="button" title="Delete"><i class="ph ph-trash"></i></button>`;
-  const chipbarHtml=()=>`<div class="mc-chipbar">${_mcStatusChip(it)}${_mcProjectChip(it)}${_mcPriorityChip(it)}${_mcTypeChip(it)}${_capDateChipFor(it)}<span class="mc-chipbar-sp"></span>${_mcButtonRow(it)}${delChip}</div>`;
+  const chipbarHtml=()=>`<div class="mc-chipbar">${_mcStatusChip(it)}${_mcProjectChip(it)}${_mcPriorityChip(it)}${_mcTypeChip(it)}${_mcTransitChip(it)}${_capDateChipFor(it)}<span class="mc-chipbar-sp"></span>${_mcButtonRow(it)}${delChip}</div>`;
   // (re)paint the chip row and (re)bind both the mc chips and our Delete button.
   // Re-binding Delete every paint matters because reRender rebuilds the row's
   // innerHTML, which would otherwise drop our handler.
@@ -14134,7 +14128,7 @@ function openCellAddPopover(node,when,x,y,allDay){
     }
     return `<span class="mc-date-pill mc-date-pill-sm" data-mc-pop="dates"><i class="ph ph-clock"></i>${txt}<i class="ph ph-caret-down mc-date-caret"></i></span>`;
   };
-  const chipbarHtml=()=>`<div class="mc-chipbar">${_mcStatusChip(ph)}${_mcProjectChip(ph)}${_mcPriorityChip(ph)}${_mcTypeChip(ph)}${_capDateChip()}<span class="mc-chipbar-sp"></span>${_mcButtonRow(ph)}</div>`;
+  const chipbarHtml=()=>`<div class="mc-chipbar">${_mcStatusChip(ph)}${_mcProjectChip(ph)}${_mcPriorityChip(ph)}${_mcTypeChip(ph)}${_mcTransitChip(ph)}${_capDateChip()}<span class="mc-chipbar-sp"></span>${_mcButtonRow(ph)}</div>`;
   const reRender=(toast)=>{
     setCapLabel();
     const r=chiphost.querySelector('.mc-root');
@@ -15237,9 +15231,15 @@ function bindMcPop(pop,it){
   // custom select field (Phase 2) — empty data-cf-pick clears the value
   pop.querySelectorAll('[data-cf-pick]').forEach(o=>o.onclick=()=>{
     const fid=_mcPop.ctx.fieldId, v=o.dataset.cfPick;
+    const _rr=reRender;
     shell.data.mutate(()=>setCustomFieldValue(itemId,fid,(v===''?null:v)),{entity:'item',render:false});
-    shell.ui.refreshCanvas();
-    reRender();closeMcPop();
+    // Close the dropdown BEFORE re-rendering the surface. The re-render rebuilds the
+    // chip row (and may refresh widgets); doing that while the picker is still open
+    // could re-anchor it to the now-detached chip or leave it overlapping the chips —
+    // which read as the Type chip "greying out" and becoming unclickable after a pick.
+    closeMcPop();
+    try{shell.ui.refreshCanvas();}catch(_){swallow(_)}
+    if(typeof _rr==='function'){try{_rr();}catch(_){swallow(_)}}
   });
   // custom text field — in-place hero/endpoint editing; commit on Enter or blur, Esc cancels
   const cfText=pop.querySelector('[data-cf-textin]');
@@ -23435,6 +23435,26 @@ function _mcTypeChip(it){
     return `<span class="mc-cf-chip mc-type-chip" data-mc-cf-select="${f.id}" title="${escAttr(nm)}">${glyph}<span>${escapeHtml(String(raw))}</span><i class="ph ph-caret-down mc-cf-caret"></i></span>`;
   }
   return `<span class="mc-cf-chip mc-cf-chip-empty mc-type-chip" data-mc-cf-select="${f.id}" title="Set ${escAttr(nm)}"><i class="ph ph-tag"></i>${escapeHtml(nm)}<i class="ph ph-caret-down mc-cf-caret"></i></span>`;
+}
+// Transport sub-mode (Plane / Train / Subway / Bus / Ferry / Car). Only meaningful
+// once Type = Transport, so the chip appears right after the Type chip in the
+// quick-add / quick-edit rows and is hidden for every other category. Reuses the
+// same cf-select picker the detail card's route token opens, so they stay in sync.
+function _mcTransitChip(it){
+  if(!(it&&it.fields&&it.fields.trip_category==='Transport'))return '';
+  const fields=(typeof getCustomFields==='function')?getCustomFields():[];
+  const f=fields.find(x=>x&&x.id==='trip_transit_mode');
+  if(!f)return '';
+  const nm=f.name||'Mode';
+  const raw=it.fields?it.fields.trip_transit_mode:undefined;
+  if(raw!=null&&raw!==''){
+    const ax=customFieldAxis(f.id);
+    const col=valueColorVars(ax,String(raw),'#8b8d98').solid;
+    const ic=valueIcon(ax,String(raw));
+    const glyph= ic?`<i class="ph ${escapeHtml(ic)}" style="color:${col};font-size:12px;"></i>`:`<span class="mc-status-dot" style="background:${col};"></span>`;
+    return `<span class="mc-cf-chip mc-type-chip" data-mc-cf-select="${f.id}" title="${escAttr(nm)}">${glyph}<span>${escapeHtml(String(raw))}</span><i class="ph ph-caret-down mc-cf-caret"></i></span>`;
+  }
+  return `<span class="mc-cf-chip mc-cf-chip-empty mc-type-chip" data-mc-cf-select="${f.id}" title="Set ${escAttr(nm)}"><i class="ph ph-path"></i>${escapeHtml(nm)}<i class="ph ph-caret-down mc-cf-caret"></i></span>`;
 }
 // ── LINK-PREVIEW (OG) for attachments ──────────────────────────────────────
 // hostname (sans www) and an instant favicon — derived from the URL with no
