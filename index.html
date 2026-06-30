@@ -9700,32 +9700,46 @@ let _lastReorderHost;       // dedupe: last reorder column/date host
 function startDragClone(row,clientX,clientY){
   endDragClone(); // safety — never two clones
   const r=row.getBoundingClientRect();
+  // The board lives inside #canvas-world, which is transform:scale()d for zoom.
+  // The clone is appended to <body> (OUTSIDE that transform), so to match the
+  // card's on-screen size we lay it out at its NATURAL (unscaled) size and scale
+  // it by the current canvas zoom. Without this the clone rendered at 1:1 and its
+  // text/icons looked larger than the zoomed-out cards behind it.
+  const z=(typeof scale==='number'&&scale>0)?scale:1;
+  const natW=row.offsetWidth||r.width, natH=row.offsetHeight||r.height;
   const clone=row.cloneNode(true);
   clone.className=row.className.replace(/\brow-reorder-drag\b/,'').trim()+' drag-clone';
   // strip any data hooks so the clone is inert
   clone.removeAttribute('data-item-id');
-  clone.style.width=r.width+'px';
-  clone.style.height=r.height+'px';
-  clone.style.left=r.left+'px';
-  clone.style.top=r.top+'px';
+  // place an element at the source's screen position, sized natural, scaled by zoom
+  const _placeZoom=el=>{
+    el.style.width=natW+'px';
+    el.style.height=natH+'px';
+    el.style.left=r.left+'px';
+    el.style.top=r.top+'px';
+    el.style.transformOrigin='0 0';
+    el.style.transform=`scale(${(z*1.02).toFixed(4)}) rotate(1.5deg)`;
+    el._dragScale=z;
+  };
   // table rows can't be position:fixed standalone — wrap in a block
   if(clone.tagName==='TR'){
     const wrap=document.createElement('div');
     wrap.className='drag-clone';
-    wrap.style.width=r.width+'px';wrap.style.height=r.height+'px';
-    wrap.style.left=r.left+'px';wrap.style.top=r.top+'px';
     const tbl=document.createElement('table');
     tbl.style.cssText='width:100%;border-collapse:collapse;background:var(--surface);';
     clone.className=row.className.replace(/\brow-reorder-drag\b/,'').trim();
     clone.style.cssText='';
     tbl.appendChild(clone);wrap.appendChild(tbl);
+    _placeZoom(wrap);
     document.body.appendChild(wrap);
     _dragClone=wrap;
   }else{
+    _placeZoom(clone);
     document.body.appendChild(clone);
     _dragClone=clone;
   }
   _dragCloneOff={x:clientX-r.left,y:clientY-r.top};
+  if(_dragClone)_dragClone._fromRow=true;   // built from a real card/row → keep its look for the whole drag
   document.body.classList.add('is-row-dragging');
 }
 // Move the clone to follow the cursor.
@@ -9756,6 +9770,13 @@ function _snapCloneLook(){
 function morphCloneToKanban(it,stripe,tint){
   if(!_dragClone||!it)return;
   if(_dragClone._kanbanMorph)return;          // already a card — leave it
+  // A clone lifted from a real card/row keeps its OWN appearance for the whole
+  // drag — what you picked up is what follows the cursor, on every widget. Morphing
+  // it into a regenerated board-card swapped its text/icons mid-drag (different
+  // chrome, recomputed tint / relative time), which read as the card "changing".
+  // Only clones built from nothing (a card-widget header / canvas card, via
+  // ensureKanbanCardClone) use the board-card representation — that's their only look.
+  if(_dragClone._fromRow)return;
   _snapCloneLook();
   _dragClone._kanbanMorph=true;
   _dragClone.className='drag-clone';
@@ -9788,9 +9809,14 @@ function ensureKanbanCardClone(it,stripe,tint,clientX,clientY){
   wrap.className='drag-clone';
   wrap.style.width='210px';wrap.style.height='auto';
   wrap.innerHTML=kanbanCardHtml(it,stripe,tint);
+  // scale to the canvas zoom so the floating card matches the board's on-screen size
+  const z=(typeof scale==='number'&&scale>0)?scale:1;
+  wrap.style.transformOrigin='0 0';
+  wrap.style.transform=`scale(${(z*1.02).toFixed(4)}) rotate(1.5deg)`;
+  wrap._dragScale=z;
   document.body.appendChild(wrap);
   _dragClone=wrap;_dragClone._kanbanMorph=true;_dragClone._scratch=true;
-  _dragCloneOff={x:18,y:14};
+  _dragCloneOff={x:18*z,y:14*z};
   document.body.classList.add('is-row-dragging');
   moveDragClone(clientX,clientY);
 }
@@ -9809,14 +9835,16 @@ function endDragClone(settleRect,onLanded){
   if(clone)clone._kanbanMorph=false;
   if(!clone){ if(onLanded)onLanded(); return; }
   if(settleRect){
+    const z=clone._dragScale||1;
     clone.classList.add('drag-clone-settle');
-    clone.style.transform='rotate(0deg) scale(1)';
+    clone.style.transform=`scale(${z}) rotate(0deg)`;   // relax the lift but keep the zoom
     clone.style.left=settleRect.left+'px';
     clone.style.top=settleRect.top+'px';
     // a morphed Kanban card keeps its own size as it lands (don't stretch it to
-    // fill the whole target widget)
-    if(settleRect.width&&!wasCard)clone.style.width=settleRect.width+'px';
-    if(settleRect.height&&!wasCard)clone.style.height=settleRect.height+'px';
+    // fill the whole target widget). settleRect is an on-screen (zoomed) rect, so
+    // divide back to the clone's natural box — the scale transform re-applies zoom.
+    if(settleRect.width&&!wasCard)clone.style.width=(settleRect.width/z)+'px';
+    if(settleRect.height&&!wasCard)clone.style.height=(settleRect.height/z)+'px';
     if(onLanded){
       // smooth land: stay solid, fire when the glide ends
       clone.style.opacity='1';
